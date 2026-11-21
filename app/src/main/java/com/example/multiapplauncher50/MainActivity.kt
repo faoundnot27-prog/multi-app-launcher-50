@@ -3,7 +3,6 @@ package com.example.multiapplauncher50
 import android.app.Activity
 import android.os.Bundle
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -14,13 +13,34 @@ class MainActivity : Activity() {
 
     private val selectedApps = mutableListOf<String>()
     private lateinit var status: TextView
+    private lateinit var queue: TextView
+    private lateinit var appList: LinearLayout
+
+    private var currentIndex = 0
+    private var running = false
+    private var paused = false
+
+    private val prefs by lazy {
+        getSharedPreferences("launcher_data", MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        selectedApps.addAll(
+            prefs.getString("selected_apps", "")
+                ?.split("\n")
+                ?.filter { it.isNotBlank() }
+                ?: emptyList()
+        )
+
+        currentIndex = prefs.getInt("current_index", 0)
+        running = prefs.getBoolean("running", false)
+        paused = prefs.getBoolean("paused", false)
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
+            setPadding(20, 20, 20, 20)
         }
 
         val title = TextView(this).apply {
@@ -29,78 +49,205 @@ class MainActivity : Activity() {
         }
 
         status = TextView(this).apply {
-            text = "Pilih aplikasi yang ingin dibuka"
             textSize = 16f
         }
 
-        val scroll = ScrollView(this)
-        val appList = LinearLayout(this).apply {
+        queue = TextView(this).apply {
+            textSize = 15f
+        }
+
+        appList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
 
-        val launchButton = Button(this).apply {
-            text = "BUKA APLIKASI TERPILIH"
-            setOnClickListener { launchApps() }
+        val scroll = ScrollView(this)
+        scroll.addView(appList)
+
+        val startButton = Button(this).apply {
+            text = "MULAI"
+            setOnClickListener { startSequence() }
+        }
+
+        val nextButton = Button(this).apply {
+            text = "BERIKUTNYA"
+            setOnClickListener { nextApp() }
+        }
+
+        val pauseButton = Button(this).apply {
+            text = "JEDA / LANJUTKAN"
+            setOnClickListener { togglePause() }
+        }
+
+        val stopButton = Button(this).apply {
+            text = "BERHENTI"
+            setOnClickListener { stopSequence() }
         }
 
         layout.addView(title)
         layout.addView(status)
-        layout.addView(scroll)
-        layout.addView(launchButton)
-        scroll.addView(appList)
+        layout.addView(queue)
+        layout.addView(startButton)
+        layout.addView(nextButton)
+        layout.addView(pauseButton)
+        layout.addView(stopButton)
+
+        layout.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
 
         setContentView(layout)
 
-        loadApps(appList)
+        loadApps()
+        updateDisplay()
     }
 
-    private fun loadApps(container: LinearLayout) {
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    private fun saveData() {
+        prefs.edit()
+            .putString("selected_apps", selectedApps.joinToString("\n"))
+            .putInt("current_index", currentIndex)
+            .putBoolean("running", running)
+            .putBoolean("paused", paused)
+            .apply()
+    }
+
+    private fun loadApps() {
+        appList.removeAllViews()
+
+        val intent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+
         val apps = packageManager.queryIntentActivities(intent, 0)
 
-        apps.sortedBy { it.loadLabel(packageManager).toString() }
-            .forEach { info ->
-                val name = info.loadLabel(packageManager).toString()
-                val packageName = info.activityInfo.packageName
+        apps.sortedBy {
+            it.loadLabel(packageManager).toString()
+        }.forEach { info ->
 
-                val button = Button(this).apply {
-                    text = if (selectedApps.contains(packageName)) "✓ $name" else name
-                    setOnClickListener {
-                        if (selectedApps.contains(packageName)) {
-                            selectedApps.remove(packageName)
-                            text = name
-                        } else if (selectedApps.size < 50) {
-                            selectedApps.add(packageName)
-                            text = "✓ $name"
-                        } else {
-                            Toast.makeText(
-                                this@MainActivity,
-                                "Maksimal 50 aplikasi",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
+            val name = info.loadLabel(packageManager).toString()
+            val packageName = info.activityInfo.packageName
 
-                        status.text = "Terpilih: ${selectedApps.size}/50"
-                    }
+            val button = Button(this).apply {
+                text = if (selectedApps.contains(packageName)) {
+                    "✓ $name"
+                } else {
+                    name
                 }
 
-                container.addView(button)
+                setOnClickListener {
+                    if (selectedApps.contains(packageName)) {
+                        selectedApps.remove(packageName)
+                        text = name
+                    } else if (selectedApps.size < 50) {
+                        selectedApps.add(packageName)
+                        text = "✓ $name"
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Maksimal 50 aplikasi",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+
+                    currentIndex = 0
+                    running = false
+                    paused = false
+                    saveData()
+                    updateDisplay()
+                }
             }
+
+            appList.addView(button)
+        }
     }
 
-    private fun launchApps() {
+    private fun startSequence() {
         if (selectedApps.isEmpty()) {
-            Toast.makeText(this, "Pilih aplikasi dahulu", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Pilih aplikasi dahulu",
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
 
-        val firstApp = selectedApps.first()
-        val launchIntent = packageManager.getLaunchIntentForPackage(firstApp)
+        currentIndex = 0
+        running = true
+        paused = false
+        saveData()
+        launchCurrentApp()
+    }
+
+    private fun nextApp() {
+        if (!running) {
+            Toast.makeText(this, "Tekan MULAI dahulu", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (paused) {
+            Toast.makeText(this, "Lanjutkan dahulu", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        currentIndex++
+
+        if (currentIndex >= selectedApps.size) {
+            stopSequence()
+            Toast.makeText(this, "Semua aplikasi selesai dibuka", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        saveData()
+        launchCurrentApp()
+    }
+
+    private fun launchCurrentApp() {
+        if (currentIndex !in selectedApps.indices) return
+
+        val packageName = selectedApps[currentIndex]
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
 
         if (launchIntent != null) {
+            updateDisplay()
             startActivity(launchIntent)
         } else {
-            Toast.makeText(this, "Aplikasi tidak dapat dibuka", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Aplikasi tidak ditemukan",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+    }
+
+    private fun togglePause() {
+        if (!running) return
+
+        paused = !paused
+        saveData()
+        updateDisplay()
+    }
+
+    private fun stopSequence() {
+        running = false
+        paused = false
+        currentIndex = 0
+        saveData()
+        updateDisplay()
+    }
+
+    private fun updateDisplay() {
+        status.text = when {
+            !running -> "Status: Siap | Terpilih: ${selectedApps.size}/50"
+            paused -> "Status: Dijeda"
+            else -> "Status: Berjalan | Aplikasi ${currentIndex + 1}/${selectedApps.size}"
+        }
+
+        queue.text = "Urutan aplikasi:\n" +
+            selectedApps.mapIndexed { index, packageName ->
+                "${index + 1}. $packageName"
+            }.joinToString("\n")
     }
 }
